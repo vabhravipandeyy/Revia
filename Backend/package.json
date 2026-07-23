@@ -1,0 +1,25 @@
+{
+  "name": "revia-backend",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Serverless backend for Revia using AWS Lambda, API Gateway, Cognito, DynamoDB, and S3-ready infrastructure.",
+  "main": "src/handlers/auth/signup.js",
+  "scripts": {
+  "check": "node --check src/handlers/auth/signup.js && node --check src/handlers/auth/verify-signup.js && node --check src/handlers/auth/resend-signup-otp.js && node --check src/handlers/auth/login.js && node --check src/handlers/auth/me.js && node --check src/handlers/auth/forgot-password-request.js && node --check src/handlers/auth/forgot-password-confirm.js && node --check src/handlers/auth/change-password.js && node --check src/handlers/users/update-profile.js && node --check src/handlers/users/delete-account-request.js && node --check src/handlers/users/delete-account-confirm.js && node --check src/handlers/agents/create-agent.js && node --check src/handlers/agents/list-agents.js && node --check src/handlers/agents/get-agent.js && node --check src/handlers/agents/update-agent.js && node --check src/handlers/agents/delete-agent.js && node --check src/handlers/messages/create-message.js && node --check src/handlers/messages/list-messages.js && node --check src/handlers/uploads/create-upload.js && node --check src/handlers/personas/create-persona.js && node --check src/handlers/personas/list-personas.js && node --check src/handlers/personas/get-persona.js && node --check src/handlers/personas/update-persona.js && node --check src/handlers/personas/delete-persona.js && node --check src/handlers/chat/send-message.js && node --check src/handlers/chat/get-history.js && node --check src/handlers/ws/connect.js && node --check src/handlers/ws/disconnect.js && node --check src/handlers/ws/default.js && node --check src/handlers/ws/join-conversation.js && node --check src/handlers/ws/leave-conversation.js && node --check src/handlers/ws/send-message.js && node --check src/lib/withAuth.js && node --check src/lib/http.js && node --check src/services/cognito.js && node --check src/services/users.js && node --check src/services/agents.js && node --check src/services/messages.js && node --check src/services/uploads.js && node --check src/services/personas.js && node --check src/services/chat-messages.js && node --check src/services/memories.js && node --check src/services/chat.js && node --check src/services/ws-connections.js && node --check src/services/ws-events.js && node --check src/models/groq.js && node --check src/models/openrouter.js && node --check src/models/llama.js && node --check src/models/index.js && node --check src/memory/retrieve-relevant-memories.js && node --check src/memory/build-memory-summary.js && node --check src/prompts/persona-system-prompt.js",
+    "build": "sam build",
+    "local": "sam local start-api",
+    "deploy:guided": "sam deploy --guided"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@aws-sdk/client-apigatewaymanagementapi": "^3.844.0",
+    "@aws-sdk/client-cognito-identity-provider": "^3.844.0",
+    "@aws-sdk/client-dynamodb": "^3.844.0",
+    "@aws-sdk/client-s3": "^3.844.0",
+    "@aws-sdk/lib-dynamodb": "^3.844.0",
+    "@aws-sdk/s3-request-presigner": "^3.844.0",
+    "aws-jwt-verify": "^5.1.0"
+  }
+}

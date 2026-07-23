@@ -1,0 +1,1094 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Revia backend with Cognito auth, persona storage, chat history, API Gateway REST API, Lambda, DynamoDB, and S3-ready resources.
+
+Parameters:
+  GroqApiKey:
+    Type: String
+    NoEcho: true
+    Description: Groq API key used for persona chat generation.
+
+Globals:
+  Function:
+    Runtime: nodejs20.x
+    Timeout: 20
+    MemorySize: 256
+    Architectures:
+      - x86_64
+    Environment:
+      Variables:
+        AWS_NODEJS_CONNECTION_REUSE_ENABLED: '1'
+        COGNITO_USER_POOL_ID: !Ref ReviaUserPool
+        COGNITO_CLIENT_ID: !Ref ReviaUserPoolClient
+        USERS_TABLE: !Ref UsersTable
+        AGENTS_TABLE: !Ref AgentsTable
+        DEFAULT_PERSONAS_TABLE: !Ref DefaultPersonasTable
+        MESSAGES_TABLE: !Ref MessagesTable
+        MEMORIES_TABLE: !Ref MemoriesTable
+        CONNECTIONS_TABLE: !Ref ConnectionsTable
+        UPLOADS_TABLE: !Ref UploadsTable
+        UPLOADS_BUCKET: !Ref UploadsBucket
+        SPACES_TABLE: !Ref SpacesTable
+        SPACE_MESSAGES_TABLE: !Ref SpaceMessagesTable
+        COGNITO_AUTO_CONFIRM: 'false'
+        GROQ_API_KEY: !Ref GroqApiKey
+        GROQ_MODEL: 'llama-3.3-70b-versatile'
+        GROQ_FALLBACK_MODEL: 'llama-3.1-8b-instant'
+        DEFAULT_MODEL_PROVIDER: 'groq'
+        DEFAULT_MODEL_NAME: 'llama-3.3-70b-versatile'
+        MEMORY_SUMMARY_INTERVAL: '6'
+        MEMORY_RETRIEVAL_LIMIT: '25'
+        SPONTANEOUS_HISTORY_TABLE: !Ref SpontaneousHistoryTable
+
+Resources:
+  ReviaApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: revia-phase1-api
+      StageName: dev
+      Cors:
+        AllowMethods: "'OPTIONS,POST,GET,PUT,DELETE'"
+        AllowHeaders: "'Content-Type,Authorization'"
+        AllowOrigin: "'*'"
+
+  ReviaWebSocketApi:
+    Type: AWS::Serverless::WebSocketApi
+    Properties:
+      Name: revia-realtime-chat
+      StageName: dev
+      RouteSelectionExpression: $request.body.action
+      Routes:
+        $connect:
+          FunctionArn: !GetAtt WebSocketConnectFunction.Arn
+        $disconnect:
+          FunctionArn: !GetAtt WebSocketDisconnectFunction.Arn
+        $default:
+          FunctionArn: !GetAtt WebSocketDefaultFunction.Arn
+        joinconversation:
+          FunctionArn: !GetAtt WebSocketJoinConversationFunction.Arn
+        leaveconversation:
+          FunctionArn: !GetAtt WebSocketLeaveConversationFunction.Arn
+        sendmessage:
+          FunctionArn: !GetAtt WebSocketSendMessageFunction.Arn
+        joinspace:
+          FunctionArn: !GetAtt WebSocketJoinSpaceFunction.Arn
+        leavespace:
+          FunctionArn: !GetAtt WebSocketLeaveSpaceFunction.Arn
+        sendspacemessage:
+          FunctionArn: !GetAtt WebSocketSendSpaceMessageFunction.Arn
+
+  ReviaUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: revia-phase1-user-pool
+      UsernameAttributes:
+        - email
+      AutoVerifiedAttributes:
+        - email
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: false
+          RequireUppercase: true
+          TemporaryPasswordValidityDays: 7
+      Schema:
+        - Name: email
+          AttributeDataType: String
+          Mutable: true
+          Required: true
+
+  ReviaUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: revia-phase1-app-client
+      UserPoolId: !Ref ReviaUserPool
+      GenerateSecret: false
+      AccessTokenValidity: 1
+      IdTokenValidity: 1
+      RefreshTokenValidity: 30
+      TokenValidityUnits:
+        AccessToken: days
+        IdToken: days
+        RefreshToken: days
+      ExplicitAuthFlows:
+        - ALLOW_ADMIN_USER_PASSWORD_AUTH
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+      PreventUserExistenceErrors: ENABLED
+
+  UsersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: revia-users-dev
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: userId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: userId
+          KeyType: HASH
+
+  AgentsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: revia-agents-dev
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: userId
+          AttributeType: S
+        - AttributeName: agentId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: userId
+          KeyType: HASH
+        - AttributeName: agentId
+          KeyType: RANGE
+
+  DefaultPersonasTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: revia-default-personas-dev
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: personaId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: personaId
+          KeyType: HASH
+
+  MessagesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: revia-messages-dev
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: userId
+          AttributeType: S
+        - AttributeName: messageKey
+          AttributeType: S
+      KeySchema:
+        - AttributeName: userId
+          KeyType: HASH
+        - AttributeName: messageKey
+          KeyType: RANGE
+
+  MemoriesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: revia-memories-dev
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: userId
+          AttributeType: S
+        - AttributeName: memoryKey
+          AttributeType: S
+      KeySchema:
+        - AttributeName: userId
+          KeyType: HASH
+        - AttributeName: memoryKey
+          KeyType: RANGE
+
+  ConnectionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: revia-connections-dev
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: userId
+          AttributeType: S
+        - AttributeName: connectionId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: userId
+          KeyType: HASH
+        - AttributeName: connectionId
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: ConnectionIdIndex
+          KeySchema:
+            - AttributeName: connectionId
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+
+  UploadsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: revia-uploads-meta-dev
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: userId
+          AttributeType: S
+        - AttributeName: fileId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: userId
+          KeyType: HASH
+        - AttributeName: fileId
+          KeyType: RANGE
+
+  SpontaneousHistoryTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: revia-spontaneous-history-dev
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: userPersonaKey
+          AttributeType: S
+        - AttributeName: sentAt
+          AttributeType: S
+      KeySchema:
+        - AttributeName: userPersonaKey
+          KeyType: HASH
+        - AttributeName: sentAt
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  SpacesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: revia-spaces-dev
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: userId
+          AttributeType: S
+        - AttributeName: spaceId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: userId
+          KeyType: HASH
+        - AttributeName: spaceId
+          KeyType: RANGE
+
+  SpaceMessagesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: revia-space-messages-dev
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: userSpaceKey
+          AttributeType: S
+        - AttributeName: messageKey
+          AttributeType: S
+      KeySchema:
+        - AttributeName: userSpaceKey
+          KeyType: HASH
+        - AttributeName: messageKey
+          KeyType: RANGE
+
+  UploadsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders:
+              - "*"
+            AllowedMethods:
+              - PUT
+              - GET
+              - HEAD
+            AllowedOrigins:
+              - "*"
+            ExposedHeaders:
+              - ETag
+            MaxAge: 3000
+
+  SignupFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: src/handlers/auth/signup.handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref UsersTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - cognito-idp:SignUp
+              Resource: "*"
+      Events:
+        SignupApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ReviaApi
+            Path: /auth/signup
+            Method: post
+
+  VerifySignupFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: src/handlers/auth/verify-signup.handler
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - cognito-idp:ConfirmSignUp
+              Resource: "*"
+      Events:
+        VerifySignupApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ReviaApi
+            Path: /auth/signup/verify
+            Method: post
+
+  ResendSignupOtpFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: src/handlers/auth/resend-signup-otp.handler
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - cognito-idp:ResendConfirmationCode
+              Resource: "*"
+      Events:
+        ResendSignupOtpApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ReviaApi
+            Path: /auth/signup/resend-otp
+            Method: post
+
+  LoginFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: src/handlers/auth/login.handler
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - cognito-idp:AdminInitiateAuth
+              Resource: "*"
+      Events:
+        LoginApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ReviaApi
+            Path: /auth/login
+            Method: post
+
+  ForgotPasswordRequestFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: src/handlers/auth/forgot-password-request.handler
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - cognito-idp:ForgotPassword
+              Resource: "*"
+      Events:
+        ForgotPasswordRequestApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ReviaApi
+            Path: /auth/forgot-password/request
+            Method: post
+
+  ForgotPasswordConfirmFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: src/handlers/auth/forgot-password-confirm.handler
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - cognito-idp:ConfirmForgotPassword
+              Resource: "*"
+      Events:
+        ForgotPasswordConfirmApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ReviaApi
+            Path: /auth/forgot-password/confirm
+            Method: post
+
+  ChangePasswordFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: src/handlers/auth/change-password.handler
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - cognito-idp:ChangePassword
+              Resource: "*"
+      Events:
+        ChangePasswordApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ReviaApi
+            Path: /auth/change-password
+            Method: post
+
+  MeFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: src/handlers/auth/me.handler
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref UsersTable
+      Events:
+        MeApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ReviaApi
+            Path: /auth/me
+            Method: get
+
+  UpdateProfileFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: src/handlers/users/update-profile.handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref UsersTable
+      Events:
+        UpdateProfileApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ReviaApi
+            Path: /users/me
+            Method: put
+
+  DeleteAccountRequestFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: src/handlers/users/delete-account-request.handler
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - cognito-idp:GetUserAttributeVerificationCode
+              Resource: "*"
+      Events:
+        DeleteAccountRequestApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ReviaApi
+            Path: /users/delete-account/request
+            Method: post
+
+  DeleteAccountConfirmFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: src/handlers/users/delete-account-confirm.handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref UsersTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - cognito-idp:VerifyUserAttribute
+                - cognito-idp:DeleteUser
+              Resource: "*"
+      Events:
+        DeleteAccountConfirmApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ReviaApi
+            Path: /users/delete-account/confirm
+            Method: post
+
+  CreateAgentFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: src/handlers/agents/create-agent.handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AgentsTable
+      Events:
+        CreateAgentApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ReviaApi
+            Path: /agents
+            Method: post
+
+  ListAgentsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: src/handlers/agents/list-agents.handler
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref AgentsTable
+      Events:
+        ListAgentsApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ReviaApi
+            Path: /agents
+            Method: get
+
+  GetAgentFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: src/handlers/agents/get-agent.handler
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref AgentsTable
+      Events:
+        GetAgentApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ReviaApi
+            Path: /agents/{id}
+            Method: get
+
+  UpdateAgentFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: src/handlers/agents/update-agent.handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AgentsTable
+      Events:
+        UpdateAgentApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ReviaApi
+            Path: /agents/{id}
+            Method: put
+
+  DeleteAgentFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: src/handlers/agents/delete-agent.handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AgentsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref MessagesTable
+      Events:
+        DeleteAgentApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ReviaApi
+            Path: /agents/{id}
+            Method: delete
+
+  CreateMessageFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: src/handlers/messages/create-message.handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref MessagesTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref AgentsTable
+      Events:
+        CreateMessageApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ReviaApi
+            Path: /messages
+            Method: post
+
+  ListMessagesFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: src/handlers/messages/list-messages.handler
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref MessagesTable
+      Events:
+        ListMessagesApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ReviaApi
+            Path: /messages/{agentId}
+            Method: get
+
+  CreateUploadFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: src/handlers/uploads/create-upload.handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref UploadsTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - s3:PutObject
+              Resource: !Sub arn:aws:s3:::${UploadsBucket}/*
+      Events:
+        CreateUploadApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ReviaApi
+            Path: /upload
+            Method: post
+
+  CreatePersonaFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: src/handlers/personas/create-persona.handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AgentsTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - s3:GetObject
+              Resource: !Sub arn:aws:s3:::${UploadsBucket}/*
+      Events:
+        CreatePersonaApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ReviaApi
+            Path: /personas
+            Method: post
+
+  ListPersonasFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: src/handlers/personas/list-personas.handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AgentsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref DefaultPersonasTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref MessagesTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - s3:GetObject
+              Resource: !Sub arn:aws:s3:::${UploadsBucket}/*
+      Events:
+        ListPersonasApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ReviaApi
+            Path: /personas
+            Method: get
+
+  GetPersonaFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: src/handlers/personas/get-persona.handler
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref AgentsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref DefaultPersonasTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - s3:GetObject
+              Resource: !Sub arn:aws:s3:::${UploadsBucket}/*
+      Events:
+        GetPersonaApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ReviaApi
+            Path: /personas/{id}
+            Method: get
+
+  UpdatePersonaFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: src/handlers/personas/update-persona.handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AgentsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref DefaultPersonasTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - s3:GetObject
+              Resource: !Sub arn:aws:s3:::${UploadsBucket}/*
+      Events:
+        UpdatePersonaApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ReviaApi
+            Path: /personas/{id}
+            Method: put
+
+  DeletePersonaFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: src/handlers/personas/delete-persona.handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AgentsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref DefaultPersonasTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref MessagesTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref MemoriesTable
+      Events:
+        DeletePersonaApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ReviaApi
+            Path: /personas/{id}
+            Method: delete
+
+  SendChatMessageFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: src/handlers/chat/send-message.handler
+      Timeout: 15
+      MemorySize: 512
+      Environment:
+        Variables:
+          GROQ_API_KEY: !Ref GroqApiKey
+          GROQ_MODEL: 'llama-3.3-70b-versatile'
+          GROQ_FALLBACK_MODEL: 'llama-3.1-8b-instant'
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AgentsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref DefaultPersonasTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref MessagesTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref MemoriesTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref SpontaneousHistoryTable
+      Events:
+        SendChatMessageApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ReviaApi
+            Path: /chat/send
+            Method: post
+
+  GetChatHistoryFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: src/handlers/chat/get-history.handler
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref MessagesTable
+      Events:
+        GetChatHistoryApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ReviaApi
+            Path: /chat/history/{conversationId}
+            Method: get
+
+  WebSocketConnectFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: src/handlers/ws/connect.handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ConnectionsTable
+
+  WebSocketDisconnectFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: src/handlers/ws/disconnect.handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ConnectionsTable
+
+  WebSocketDefaultFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: src/handlers/ws/default.handler
+
+  WebSocketJoinConversationFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: src/handlers/ws/join-conversation.handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ConnectionsTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - execute-api:ManageConnections
+              Resource: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ReviaWebSocketApi}/*/@connections/*
+
+  WebSocketLeaveConversationFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: src/handlers/ws/leave-conversation.handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ConnectionsTable
+
+  WebSocketSendMessageFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: src/handlers/ws/send-message.handler
+      Timeout: 60
+      MemorySize: 512
+      Environment:
+        Variables:
+          GROQ_API_KEY: !Ref GroqApiKey
+          GROQ_MODEL: 'llama-3.3-70b-versatile'
+          GROQ_FALLBACK_MODEL: 'llama-3.1-8b-instant'
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ConnectionsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AgentsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref DefaultPersonasTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref MessagesTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref MemoriesTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref SpontaneousHistoryTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - execute-api:ManageConnections
+              Resource: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ReviaWebSocketApi}/*/@connections/*
+
+  CreateSpaceFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: src/handlers/spaces/create-space.handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref SpacesTable
+      Events:
+        CreateSpaceApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ReviaApi
+            Path: /spaces
+            Method: post
+
+  ListSpacesFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: src/handlers/spaces/list-spaces.handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref SpacesTable
+      Events:
+        ListSpacesApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ReviaApi
+            Path: /spaces
+            Method: get
+
+  GetSpaceFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: src/handlers/spaces/get-space.handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref SpacesTable
+      Events:
+        GetSpaceApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ReviaApi
+            Path: /spaces/{id}
+            Method: get
+
+  UpdateSpaceFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: src/handlers/spaces/update-space.handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref SpacesTable
+      Events:
+        UpdateSpaceApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ReviaApi
+            Path: /spaces/{id}
+            Method: put
+
+  DeleteSpaceFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: src/handlers/spaces/delete-space.handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref SpacesTable
+      Events:
+        DeleteSpaceApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ReviaApi
+            Path: /spaces/{id}
+            Method: delete
+
+  ListSpaceMessagesFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: src/handlers/spaces/list-space-messages.handler
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref SpaceMessagesTable
+      Events:
+        ListSpaceMessagesApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ReviaApi
+            Path: /spaces/{id}/messages
+            Method: get
+
+  WebSocketJoinSpaceFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: src/handlers/ws/join-space.handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ConnectionsTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - execute-api:ManageConnections
+              Resource: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ReviaWebSocketApi}/*/@connections/*
+
+  WebSocketLeaveSpaceFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: src/handlers/ws/leave-space.handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ConnectionsTable
+
+  WebSocketSendSpaceMessageFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: src/handlers/ws/send-space-message.handler
+      Timeout: 120
+      MemorySize: 512
+      Environment:
+        Variables:
+          GROQ_API_KEY: !Ref GroqApiKey
+          GROQ_MODEL: 'llama-3.3-70b-versatile'
+          GROQ_FALLBACK_MODEL: 'llama-3.1-8b-instant'
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ConnectionsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AgentsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref DefaultPersonasTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref SpacesTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref SpaceMessagesTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref UsersTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - execute-api:ManageConnections
+              Resource: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ReviaWebSocketApi}/*/@connections/*
+
+Outputs:
+  ApiBaseUrl:
+    Description: Base URL for the API Gateway stage
+    Value: !Sub https://${ReviaApi}.execute-api.${AWS::Region}.amazonaws.com/dev
+
+  UserPoolId:
+    Description: Cognito User Pool ID
+    Value: !Ref ReviaUserPool
+
+  UserPoolClientId:
+    Description: Cognito App Client ID
+    Value: !Ref ReviaUserPoolClient
+
+  UsersTableName:
+    Description: DynamoDB table for minimal profiles
+    Value: !Ref UsersTable
+
+  AgentsTableName:
+    Description: DynamoDB table for persona agents
+    Value: !Ref AgentsTable
+
+  DefaultPersonasTableName:
+    Description: DynamoDB table for built-in signature personas
+    Value: !Ref DefaultPersonasTable
+
+  MessagesTableName:
+    Description: DynamoDB table for chat history messages
+    Value: !Ref MessagesTable
+
+  WebSocketApiUrl:
+    Description: WebSocket API URL for realtime chat
+    Value: !Sub wss://${ReviaWebSocketApi}.execute-api.${AWS::Region}.amazonaws.com/dev
+
+  MemoriesTableName:
+    Description: DynamoDB table for lightweight memory summaries
+    Value: !Ref MemoriesTable
+
+  ConnectionsTableName:
+    Description: DynamoDB table for active websocket connections
+    Value: !Ref ConnectionsTable
+
+  UploadsTableName:
+    Description: DynamoDB table for upload metadata
+    Value: !Ref UploadsTable
+
+  UploadsBucketName:
+    Description: S3 bucket reserved for future uploads
+    Value: !Ref UploadsBucket
+
+  SpontaneousHistoryTableName:
+    Description: DynamoDB table for spontaneous message anti-repetition tracking
+    Value: !Ref SpontaneousHistoryTable
